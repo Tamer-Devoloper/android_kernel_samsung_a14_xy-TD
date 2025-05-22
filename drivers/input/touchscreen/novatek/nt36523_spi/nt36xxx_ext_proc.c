@@ -2,7 +2,7 @@
  * Copyright (C) 2010 - 2018 Novatek, Inc.
  *
  * $Revision: 52752 $
- * $Date: 2019-11-06 18:05:46 +0800 (?�三, 06 ?��??? 2019) $
+ * $Date: 2019-11-06 18:05:46 +0800 (週三, 06 十一月 2019) $
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -333,21 +333,13 @@ static int32_t nvt_fw_version_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_fw_version_seq_ops);
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0))
-static const struct proc_ops nvt_fw_version_fops = {
-	.proc_open = nvt_fw_version_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = seq_release,
-};
-#else
-const struct file_operations nvt_fw_version_fops = {
+static const struct file_operations nvt_fw_version_fops = {
+	.owner = THIS_MODULE,
 	.open = nvt_fw_version_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:
@@ -396,21 +388,13 @@ static int32_t nvt_baseline_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_seq_ops);
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0))
-static const struct proc_ops nvt_baseline_fops = {
-	.proc_open = nvt_baseline_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = seq_release,
-};
-#else
-const struct file_operations nvt_baseline_fops = {
+static const struct file_operations nvt_baseline_fops = {
+	.owner = THIS_MODULE,
 	.open = nvt_baseline_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:
@@ -462,21 +446,13 @@ static int32_t nvt_raw_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_seq_ops);
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0))
-static const struct proc_ops nvt_raw_fops = {
-	.proc_open = nvt_raw_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = seq_release,
-};
-#else
-const struct file_operations nvt_raw_fops = {
+static const struct file_operations nvt_raw_fops = {
+	.owner = THIS_MODULE,
 	.open = nvt_raw_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:
@@ -528,21 +504,13 @@ static int32_t nvt_diff_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_seq_ops);
 }
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0))
-static const struct proc_ops nvt_diff_fops = {
-	.proc_open = nvt_diff_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = seq_release,
-};
-#else
-const struct file_operations nvt_diff_fops = {
+static const struct file_operations nvt_diff_fops = {
+	.owner = THIS_MODULE,
 	.open = nvt_diff_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:

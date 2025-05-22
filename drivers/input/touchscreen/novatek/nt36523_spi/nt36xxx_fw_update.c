@@ -19,11 +19,12 @@
 #include <linux/firmware.h>
 #include <linux/gpio.h>
 #include <linux/vmalloc.h>
-#if IS_ENABLED(CONFIG_SPU_VERIFY)
+#if defined(CONFIG_SPU_VERIFY)
 #include <linux/spu-verify.h>
-#define SUPPORT_SIGNED_FW
 #endif
 #include "nt36xxx.h"
+
+#if BOOT_UPDATE_FIRMWARE
 
 #define SIZE_4KB 4096
 #define FLASH_SECTOR_SIZE SIZE_4KB
@@ -42,9 +43,14 @@
 #define FW_BIN_PANEL_ID		(FW_BIN_SEC_INFO + 4)
 #define FW_BIN_VERSION		(FW_BIN_SEC_INFO + 5)
 
-static struct timespec64 start, end;
+static struct timeval start, end;
+const struct firmware *fw_entry = NULL;
 static size_t fw_need_write_size = 0;
 static uint8_t *fwbuf = NULL;
+//UMS
+struct firmware tmp_fw_entry;
+u8 *fw_data;
+long fw_size;
 
 struct nvt_ts_bin_map {
 	char name[12];
@@ -55,8 +61,9 @@ struct nvt_ts_bin_map {
 };
 
 static struct nvt_ts_bin_map *bin_map;
+int nvt_sec_mp_parse_dt(struct nvt_ts_data *ts, const char *node_compatible);
 
-static int32_t nvt_get_fw_need_write_size(struct nvt_firmware *fw_entry)
+static int32_t nvt_get_fw_need_write_size(const struct firmware *fw_entry)
 {
 	int32_t i = 0;
 	int32_t total_sectors_to_check = 0;
@@ -83,8 +90,7 @@ static int32_t nvt_get_fw_need_write_size(struct nvt_firmware *fw_entry)
 		}
 	}
 
-	input_err(true, &ts->client->dev, "%s: end flag \"NVT\" \"MOD\" not found! fw_entry->size(%ld)\n",
-				__func__, fw_entry->size);
+	input_err(true, &ts->client->dev, "%s: end flag \"NVT\" \"MOD\" not found!\n", __func__);
 	return -1;
 }
 
@@ -148,7 +154,7 @@ return:
 *******************************************************/
 static uint32_t partition = 0;
 static uint8_t ilm_dlm_num = 2;
-static int32_t nvt_bin_header_parser(u8 *fwdata, size_t fwsize)
+static int32_t nvt_bin_header_parser(const u8 *fwdata, size_t fwsize)
 {
 	uint32_t list = 0;
 	uint32_t pos = 0x00;
@@ -178,7 +184,7 @@ static int32_t nvt_bin_header_parser(u8 *fwdata, size_t fwsize)
 	 * ilm_dlm_num (ILM & DLM) + ovly_sec_num + info_sec_num
 	 */
 	partition = ilm_dlm_num + ovly_sec_num + info_sec_num;
-	input_dbg(false, &ts->client->dev, "%s: ovly_info = %d, ilm_dlm_num = %d, ovly_sec_num = %d, info_sec_num = %d, partition = %d\n",
+	input_info(true, &ts->client->dev, "%s: ovly_info = %d, ilm_dlm_num = %d, ovly_sec_num = %d, info_sec_num = %d, partition = %d\n",
 					__func__, ovly_info, ilm_dlm_num, ovly_sec_num, info_sec_num, partition);
 
 	/* allocated memory for header info */
@@ -277,12 +283,28 @@ static int32_t nvt_bin_header_parser(u8 *fwdata, size_t fwsize)
 			return -EINVAL;
 		}
 
-		input_dbg(false, &ts->client->dev, "%s: [%d][%s] SRAM (0x%08X), SIZE (0x%08X), BIN (0x%08X), CRC (0x%08X)\n",
+		input_err(true, &ts->client->dev, "%s: [%d][%s] SRAM (0x%08X), SIZE (0x%08X), BIN (0x%08X), CRC (0x%08X)\n",
 				__func__, list, bin_map[list].name,
 				bin_map[list].SRAM_addr, bin_map[list].size,  bin_map[list].BIN_addr, bin_map[list].crc);
 	}
 
 	return 0;
+}
+
+/*******************************************************
+Description:
+	Novatek touchscreen release update firmware function.
+
+return:
+	n.a.
+*******************************************************/
+static void update_firmware_release(void)
+{
+	if (fw_entry) {
+		release_firmware(fw_entry);
+	}
+
+	fw_entry = NULL;
 }
 
 /*******************************************************
@@ -296,102 +318,72 @@ static int32_t update_firmware_request(const char *filename)
 {
 	uint8_t retry = 0;
 	int32_t ret = 0;
-	const struct firmware *fw_entry = NULL;
 
 	if (NULL == filename) {
 		return -ENOENT;
 	}
 
 	while (1) {
+		input_info(true, &ts->client->dev,"filename is %s\n", filename);
 
-		if (ts->fw_index == NVT_TSP_FW_IDX_BIN) {
-			if (ts->nvt_bin_fw == NULL) {
-				input_info(true, &ts->client->dev, "%s : request firmware bin (%s)\n", __func__, filename);
-				ret = request_firmware(&fw_entry, filename, &ts->client->dev);
-				if (ret) {
-					input_err(true, &ts->client->dev, "firmware load failed, ret=%d\n", ret);
-					goto request_fail;
-				}
-
-				// save bin fw data
-				ts->nvt_bin_fw = vzalloc(sizeof(struct nvt_firmware));
-				ts->nvt_bin_fw->data = vzalloc(fw_entry->size);
-				ts->nvt_bin_fw->size = fw_entry->size;
-				memcpy(ts->nvt_bin_fw->data, fw_entry->data, ts->nvt_bin_fw->size);
-			}
-
-			input_info(true, &ts->client->dev, "%s : set bin fw\n", __func__);
-			ts->cur_fw = ts->nvt_bin_fw;
-
-		} else if (ts->fw_index == NVT_TSP_FW_IDX_UMS) {
-			if (ts->nvt_ums_fw != NULL && ts->nvt_ums_fw->data != NULL && ts->nvt_ums_fw->size != 0) {
-				input_info(true, &ts->client->dev, "%s : set ums fw\n", __func__);
-				ts->cur_fw = ts->nvt_ums_fw;
+		if(ts->isUMS) {
+			input_info(true, &ts->client->dev, "%s ts->isUMS\n", __func__);
+			if(tmp_fw_entry.data != NULL) {
+				input_info(true, &ts->client->dev, "%s UMS FW present\n", __func__);
+				fw_entry = &tmp_fw_entry;
 			} else {
-				input_info(true, &ts->client->dev, "%s : ums fw is null & set bin fw\n", __func__);
-				if (ts->nvt_ums_fw != NULL && ts->nvt_ums_fw->data != NULL) {
-					vfree(ts->nvt_ums_fw->data);
-					ts->nvt_ums_fw->size = 0;
-					ts->nvt_ums_fw->data = NULL;
-				}
-				ts->nvt_ums_fw = NULL;
-
-				ts->cur_fw = ts->nvt_bin_fw;
-				ts->fw_index = NVT_TSP_FW_IDX_BIN;
+				input_info(true, &ts->client->dev, "%s UMS FW NOT present\n", __func__);
+				ts->isUMS = false;
 			}
+		}
 
-		} else if (ts->fw_index == NVT_TSP_FW_IDX_MP) {
-			if (ts->nvt_mp_fw == NULL) {
-				input_info(true, &ts->client->dev, "%s : request firmware mp (%s)\n", __func__, filename);
-				ret = request_firmware(&fw_entry, filename, &ts->client->dev);
-				if (ret) {
-					input_err(true, &ts->client->dev, "firmware load failed, ret=%d\n", ret);
-					goto request_fail;
-				}
-
-				ts->nvt_mp_fw = vzalloc(sizeof(struct nvt_firmware));
-				ts->nvt_mp_fw->data = vzalloc(fw_entry->size);
-				ts->nvt_mp_fw->size = fw_entry->size;
-				memcpy(ts->nvt_mp_fw->data, fw_entry->data, ts->nvt_mp_fw->size);
+		if(!ts->isUMS){
+			ret = request_firmware(&fw_entry, filename, &ts->client->dev);
+			if (ret) {
+			input_err(true, &ts->client->dev,"firmware load failed, ret=%d\n", ret);
+			goto request_fail;
 			}
-
-			ts->cur_fw = ts->nvt_mp_fw;
-			input_info(true, &ts->client->dev, "%s : set mp fw\n", __func__);
 		}
 
 		// check FW need to write size
-		if (nvt_get_fw_need_write_size(ts->cur_fw)) {
+		if (nvt_get_fw_need_write_size(fw_entry)) {
 			input_err(true, &ts->client->dev,"get fw need to write size fail!\n");
 			ret = -EINVAL;
 			goto invalid;
 		}
 
 		// check if FW version add FW version bar equals 0xFF
-		if (*(ts->cur_fw->data + FW_BIN_VER_OFFSET) + *(ts->cur_fw->data + FW_BIN_VER_BAR_OFFSET) != 0xFF) {
-			input_err(true, &ts->client->dev, "bin file FW_VER + FW_VER_BAR should be 0xFF!\n");
-			input_err(true, &ts->client->dev, "FW_VER=0x%02X, FW_VER_BAR=0x%02X\n", *(ts->cur_fw->data+FW_BIN_VER_OFFSET), *(ts->cur_fw->data+FW_BIN_VER_BAR_OFFSET));
+		if (*(fw_entry->data + FW_BIN_VER_OFFSET) + *(fw_entry->data + FW_BIN_VER_BAR_OFFSET) != 0xFF) {
+			input_err(true, &ts->client->dev,"bin file FW_VER + FW_VER_BAR should be 0xFF!\n");
+			input_err(true, &ts->client->dev,"FW_VER=0x%02X, FW_VER_BAR=0x%02X\n", *(fw_entry->data+FW_BIN_VER_OFFSET), *(fw_entry->data+FW_BIN_VER_BAR_OFFSET));
 			ret = -ENOEXEC;
 			goto invalid;
 		}
 
 		/* BIN Header Parser */
-		ret = nvt_bin_header_parser(ts->cur_fw->data, ts->cur_fw->size);
+		ret = nvt_bin_header_parser(fw_entry->data, fw_entry->size);
 		if (ret) {
 			input_err(true, &ts->client->dev,"bin header parser failed\n");
 			goto invalid;
 		} else {
-			ts->fw_ver_bin[0] = ts->cur_fw->data[FW_BIN_IC_ID];
-			ts->fw_ver_bin[1] = ts->cur_fw->data[FW_BIN_PROJECT_ID];
-			ts->fw_ver_bin[2] = ts->cur_fw->data[FW_BIN_PANEL_ID];
-			ts->fw_ver_bin[3] = ts->cur_fw->data[FW_BIN_VER_OFFSET];
-			ts->fw_ver_bin_bar = ts->cur_fw->data[FW_BIN_VER_BAR_OFFSET];
+			ts->fw_ver_bin[0] = fw_entry->data[FW_BIN_IC_ID];
+			ts->fw_ver_bin[1] = fw_entry->data[FW_BIN_PROJECT_ID];
+			ts->fw_ver_bin[2] = fw_entry->data[FW_BIN_PANEL_ID];
+			ts->fw_ver_bin[3] = fw_entry->data[FW_BIN_VER_OFFSET];
+			ts->fw_ver_bin_bar = fw_entry->data[FW_BIN_VER_BAR_OFFSET];
 
-			input_dbg(false, &ts->client->dev, "%s: fw_ver_bin = %02X%02X%02X%02X\n", __func__,
+			input_err(true, &ts->client->dev, "%s: fw_ver_bin = %02X%02X%02X%02X\n", __func__,
 				ts->fw_ver_bin[0], ts->fw_ver_bin[1], ts->fw_ver_bin[2], ts->fw_ver_bin[3]);
 			break;
 		}
 
 invalid:
+		if(ts->isUMS) {
+			input_info(true, &ts->client->dev, "%s UMS Update NO update_firmware_release\n", __func__);
+		} else {
+			input_info(true, &ts->client->dev, "%s BUILT-IN Update update_firmware_release\n", __func__);
+			update_firmware_release();
+		}
 		if (!IS_ERR_OR_NULL(bin_map)) {
 			kfree(bin_map);
 			bin_map = NULL;
@@ -403,10 +395,6 @@ request_fail:
 			input_err(true, &ts->client->dev,"error, retry=%d\n", retry);
 			break;
 		}
-	}
-
-	if (fw_entry) {
-		release_firmware(fw_entry);
 	}
 
 	return ret;
@@ -916,20 +904,14 @@ static int32_t nvt_download_firmware_hw_crc(void)
 	uint8_t retry = 0;
 	int32_t ret = 0;
 
-	ktime_get_real_ts64(&start);
-
-	if (ts->cur_fw->data == NULL || ts->cur_fw->size == 0) {
-		input_err(true, &ts->client->dev, "%s: fail get ts->cur_fw (%ld)\n",
-					__func__, ts->cur_fw->size);
-		goto fail;
-	}
+	do_gettimeofday(&start);
 
 	while (1) {
 		/* bootloader reset to reset MCU */
 		nvt_bootloader_reset();
 
 		/* Start to write firmware process */
-		ret = nvt_write_firmware(ts->cur_fw->data, ts->cur_fw->size);
+		ret = nvt_write_firmware(fw_entry->data, fw_entry->size);
 		if (ret) {
 			input_err(true, &ts->client->dev, "%s: Write_Firmware failed. (%d)\n", __func__, ret);
 			goto fail;
@@ -971,7 +953,7 @@ fail:
 		}
 	}
 
-	ktime_get_real_ts64(&end);
+	do_gettimeofday(&end);
 
 	return ret;
 }
@@ -989,7 +971,7 @@ static int32_t nvt_download_firmware(void)
 	uint8_t retry = 0;
 	int32_t ret = 0;
 
-	ktime_get_real_ts64(&start);
+	do_gettimeofday(&start);
 
 	while (1) {
 		/*
@@ -998,12 +980,12 @@ static int32_t nvt_download_firmware(void)
 		 */
 #if NVT_TOUCH_SUPPORT_HW_RST
 		gpio_set_value(ts->reset_gpio, 0);
-		usleep_range(5000, 5001);	//wait 1ms
+		mdelay(1);	//wait 1ms
 #endif
 		nvt_eng_reset();
 #if NVT_TOUCH_SUPPORT_HW_RST
 		gpio_set_value(ts->reset_gpio, 1);
-		usleep_range(10000, 10001);	//wait tRT2BRST after TP_RST0
+		mdelay(10);	//wait tRT2BRST after TP_RST
 #endif
 		nvt_bootloader_reset();
 
@@ -1011,7 +993,7 @@ static int32_t nvt_download_firmware(void)
 		nvt_write_addr(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_RESET_COMPLETE, 0x00);
 
 		/* Start to write firmware process */
-		ret = nvt_write_firmware(ts->cur_fw->data, ts->cur_fw->size);
+		ret = nvt_write_firmware(fw_entry->data, fw_entry->size);
 		if (ret) {
 			input_err(true, &ts->client->dev,"Write_Firmware failed. (%d)\n", ret);
 			goto fail;
@@ -1050,7 +1032,7 @@ fail:
 		}
 	}
 
-	ktime_get_real_ts64(&end);
+	do_gettimeofday(&end);
 
 	return ret;
 }
@@ -1096,19 +1078,25 @@ int32_t nvt_update_firmware(const char *firmware_name)
 		goto download_fail;
 	}
 
-	input_info(true, &ts->client->dev, "%s : Update firmware success! <%lldms>\n", __func__,
-					((end.tv_sec - start.tv_sec) * 1000000000L + (end.tv_nsec - start.tv_nsec)) / 1000000L);
+	input_info(true, &ts->client->dev, "%s: Update firmware success! <%ld us>\n",
+			__func__, (end.tv_sec - start.tv_sec)*1000000L + (end.tv_usec - start.tv_usec));
 
 	/* Get FW Info */
 	ret = nvt_get_fw_info();
 	if (ret) {
-		input_err(true, &ts->client->dev, "nvt_get_fw_info failed. (%d)\n", ret);
+		input_err(true, &ts->client->dev,"nvt_get_fw_info failed. (%d)\n", ret);
 	}
 
 download_fail:
 	if (!IS_ERR_OR_NULL(bin_map)) {
 		kfree(bin_map);
 		bin_map = NULL;
+	}
+	if(ts->isUMS) {
+			input_info(true, &ts->client->dev, "%s UMS Update NO update_firmware_release\n", __func__);
+	} else {
+		input_info(true, &ts->client->dev, "%s BUILT-IN Update update_firmware_release\n", __func__);
+		update_firmware_release();
 	}
 request_firmware_fail:
 
@@ -1117,161 +1105,161 @@ request_firmware_fail:
 
 int nvt_ts_fw_update_from_external(struct nvt_ts_data *ts, const char *file_path)
 {
-	const struct firmware *fw_entry;
+	struct file *fp;
+	mm_segment_t old_fs;
+	long nread;
+#if defined(CONFIG_SPU_VERIFY)
+	long spu_ret;
+#endif
 	int ret = 0;
-	long fw_size = 0;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
 
 	mutex_lock(&ts->lock);
 
-	ret = request_firmware(&fw_entry, file_path, &ts->client->dev);
-	if (ret) {
-		input_err(true, &ts->client->dev, "%s: firmware is not available %d\n", __func__, ret);
-		mutex_unlock(&ts->lock);
-		return -ENOENT;
+	fp = filp_open(file_path, O_RDONLY, S_IRUSR);
+	if (IS_ERR(fp)) {
+		input_err(true, &ts->client->dev, "%s: failed to open %s\n",
+			__func__, file_path);
+			mutex_unlock(&ts->lock);
+			set_fs(old_fs);
+			return PTR_ERR(fp);
 	}
 
-	if (fw_entry->size <= 0) {
-		input_err(true, &ts->client->dev, "%s: fw size error %ld\n", __func__, fw_entry->size);
-		ret = -ENOENT;
-		goto out;
-	}
+	fw_size = fp->f_path.dentry->d_inode->i_size;
+	if (fw_size > 0) {
+		if(fw_data != NULL) {
+			vfree(fw_data);
+		}
 
-	fw_size = fw_entry->size;
+		fw_data = vzalloc(fw_size);
+		if (!fw_data) {
+			input_err(true, &ts->client->dev, "%s: failed to alloc mem\n", __func__);
+			ret = -ENOMEM;
+			goto out;
+		}
 
-	if (strncmp(file_path, TSP_SPU_FW_SIGNED, strlen(TSP_SPU_FW_SIGNED)) == 0
-			|| strncmp(file_path, TSP_EXTERNAL_FW_SIGNED, strlen(TSP_EXTERNAL_FW_SIGNED)) == 0) {
-		
-#if defined(SUPPORT_SIGNED_FW)
-		long spu_ret = spu_firmware_signature_verify("TSP", fw_entry->data, fw_entry->size);
-
-		fw_size = fw_entry->size - SPU_METADATA_SIZE(TSP);	/* name 3, digest 32, signature 512 */
-		input_info(true, &ts->client->dev, "%s: spu_ret : %ld, fw_size : %ld, spu_fw_size:%ld\n",
-					__func__, spu_ret, fw_size, fw_entry->size);
-
-		if (spu_ret != fw_size) {
-			input_err(true, &ts->client->dev, "%s: signature verify failed, %ld\n", __func__, spu_ret);
+		nread = vfs_read(fp, (char __user *)fw_data, fw_size, &fp->f_pos);
+		if (nread != fw_size) {
+			input_err(true, &ts->client->dev, "%s: failed to read firmware file, nread %ld Bytes\n",
+				__func__, nread);
 			ret = -EIO;
-			goto out;
-		}
-#else
-		input_err(true, &ts->client->dev, "%s: spu_firmware_signature_verify is not called!\n", __func__);
-		ret = -EIO;
-		goto out;
+
+		} else {
+#if defined(CONFIG_SPU_VERIFY)
+			if (strncmp(file_path, TSP_PATH_EXTERNAL_FW_SIGNED, strlen(TSP_PATH_EXTERNAL_FW_SIGNED)) == 0) {
+				spu_ret = spu_firmware_signature_verify("TSP", fw_data, fw_size);
+				input_info(true, &ts->client->dev,
+						"%s: spu_ret : %ld, spu_fw_size:%ld\n", __func__, spu_ret, fw_size);
+
+				/* name 3, digest 32, signature 512 */
+				fw_size -= SPU_METADATA_SIZE(TSP);
+
+				if (spu_ret != fw_size) {
+					input_err(true, &ts->client->dev,
+							"%s: signature verify failed, %ld\n", __func__, spu_ret);
+					vfree(fw_data);
+					ret = -EIO;
+					goto out;
+				}
+			}
 #endif
-	}
+			input_info(true, &ts->client->dev, "%s: start, file path %s, size %ld Bytes\n",
+				__func__, file_path, fw_size);
 
-	input_info(true, &ts->client->dev, "%s: start, file path %s, size %ld Bytes\n",
-		__func__, file_path, fw_size);
+			input_info(true, &ts->client->dev, "%s: ic: project id %02X, firmware version %02X\n",
+				__func__, ts->fw_ver_ic[1], ts->fw_ver_ic[3]);
+			input_info(true, &ts->client->dev, "%s: fw: project id %02X, firmware version %02X\n",
+				__func__, fw_data[FW_BIN_PROJECT_ID], fw_data[FW_BIN_VER_OFFSET]);
 
-	input_info(true, &ts->client->dev, "%s: ic: project id %02X, firmware version %02X\n",
-		__func__, ts->fw_ver_ic[1], ts->fw_ver_ic[3]);
-	input_info(true, &ts->client->dev, "%s: fw: project id %02X, firmware version %02X\n",
-		__func__, fw_entry->data[FW_BIN_PROJECT_ID], fw_entry->data[FW_BIN_VER_OFFSET]);
+#if defined(CONFIG_SPU_VERIFY)
+			if (strncmp(file_path, TSP_PATH_EXTERNAL_FW_SIGNED, strlen(TSP_PATH_EXTERNAL_FW_SIGNED)) == 0) {
+				if (ts->fw_ver_ic[1] != fw_data[FW_BIN_PROJECT_ID]) {
+					input_info(true, &ts->client->dev,
+							"%s: skip update, fw project id miss match\n", __func__);
+					goto out;
+				}
+			}
+#endif
+			tmp_fw_entry.data = fw_data;
+			tmp_fw_entry.size = fw_size;
 
-	if (strncmp(file_path, TSP_SPU_FW_SIGNED, strlen(TSP_SPU_FW_SIGNED)) == 0) {
-		if (ts->fw_ver_ic[3] >= fw_entry->data[FW_BIN_VER_OFFSET]) {
-			input_info(true, &ts->client->dev, "%s: skip spu update\n", __func__);
-			goto out;
-		}
-	} else if (strncmp(file_path, TSP_EXTERNAL_FW_SIGNED, strlen(TSP_EXTERNAL_FW_SIGNED)) == 0) {
-		if (ts->fw_ver_ic[1] != fw_entry->data[FW_BIN_PROJECT_ID]) {
-			input_info(true, &ts->client->dev, "%s: skip update, fw project id miss match\n", __func__);
-			goto out;
-		}
-	}
+			fw_entry = &tmp_fw_entry;
 
-	// init nvt_ums_fw
-	if (ts->nvt_ums_fw == NULL) {
-		input_info(true, &ts->client->dev, "%s: init nvt_ums_fw\n", __func__);
-		ts->nvt_ums_fw = vzalloc(sizeof(struct nvt_firmware));
-		ts->nvt_ums_fw->size = 0;
-		ts->nvt_ums_fw->data = NULL;
-	}
-	// clear nvt_ums_fw->data
-	if (ts->nvt_ums_fw->data) {
-		input_info(true, &ts->client->dev, "%s: clear nvt_ums_fw->data\n", __func__);
-		vfree(ts->nvt_ums_fw->data);
-		ts->nvt_ums_fw->size = 0;
-		ts->nvt_ums_fw->data = NULL;
-	}
+			// check FW need to write size
+			if (nvt_get_fw_need_write_size(fw_entry)) {
+				input_err(true, &ts->client->dev,"get fw need to write size fail!\n");
+				ret = -EINVAL;
+				goto download_fail;
+			}
 
-	ts->nvt_ums_fw->data = vzalloc(fw_size);
-	ts->nvt_ums_fw->size = fw_size;
-	memcpy(ts->nvt_ums_fw->data, fw_entry->data, ts->nvt_ums_fw->size);
+			// check if FW version add FW version bar equals 0xFF
+			if (*(fw_entry->data + FW_BIN_VER_OFFSET) + *(fw_entry->data + FW_BIN_VER_BAR_OFFSET) != 0xFF) {
+				input_err(true, &ts->client->dev,"bin file FW_VER + FW_VER_BAR should be 0xFF!\n");
+				input_err(true, &ts->client->dev,"FW_VER=0x%02X, FW_VER_BAR=0x%02X\n", *(fw_entry->data+FW_BIN_VER_OFFSET), *(fw_entry->data+FW_BIN_VER_BAR_OFFSET));
+				ret = -ENOEXEC;
+				goto download_fail;
+			}
 
-	ts->cur_fw = ts->nvt_ums_fw;
+			/* BIN Header Parser */
+			ret = nvt_bin_header_parser(fw_entry->data, fw_entry->size);
+			if (ret) {
+				input_err(true, &ts->client->dev,"bin header parser failed\n");
+				goto download_fail;
+			} else {
+				ts->fw_ver_bin[0] = fw_entry->data[FW_BIN_IC_ID];
+				ts->fw_ver_bin[1] = fw_entry->data[FW_BIN_PROJECT_ID];
+				ts->fw_ver_bin[2] = fw_entry->data[FW_BIN_PANEL_ID];
+				ts->fw_ver_bin[3] = fw_entry->data[FW_BIN_VER_OFFSET];
+				ts->fw_ver_bin_bar = fw_entry->data[FW_BIN_VER_BAR_OFFSET];
 
-	// check FW need to write size
-	if (nvt_get_fw_need_write_size(ts->cur_fw)) {
-		input_err(true, &ts->client->dev, "get fw need to write size fail!\n");
-		ret = -EINVAL;
-		goto download_fail;
-	}
+				input_info(true, &ts->client->dev, "%s: fw_ver_bin = %02X%02X%02X%02X\n", __func__,
+					ts->fw_ver_bin[0], ts->fw_ver_bin[1], ts->fw_ver_bin[2], ts->fw_ver_bin[3]);
+			}
 
-	// check if FW version add FW version bar equals 0xFF
-	if (*(ts->cur_fw->data + FW_BIN_VER_OFFSET) + *(ts->cur_fw->data + FW_BIN_VER_BAR_OFFSET) != 0xFF) {
-		input_err(true, &ts->client->dev, "bin file FW_VER + FW_VER_BAR should be 0xFF!\n");
-		input_err(true, &ts->client->dev, "FW_VER=0x%02X, FW_VER_BAR=0x%02X\n",
-					*(ts->cur_fw->data+FW_BIN_VER_OFFSET), *(ts->cur_fw->data+FW_BIN_VER_BAR_OFFSET));
-		ret = -ENOEXEC;
-		goto download_fail;
-	}
+			/* initial buffer and variable */
+			ret = nvt_download_init();
+			if (ret) {
+				input_err(true, &ts->client->dev,"Download Init failed. (%d)\n", ret);
+				goto download_fail;
+			}
 
-	/* BIN Header Parser */
-	ret = nvt_bin_header_parser(ts->cur_fw->data, ts->cur_fw->size);
-	if (ret) {
-		input_err(true, &ts->client->dev, "bin header parser failed\n");
-		goto download_fail;
-	} else {
-		ts->fw_ver_bin[0] = ts->cur_fw->data[FW_BIN_IC_ID];
-		ts->fw_ver_bin[1] = ts->cur_fw->data[FW_BIN_PROJECT_ID];
-		ts->fw_ver_bin[2] = ts->cur_fw->data[FW_BIN_PANEL_ID];
-		ts->fw_ver_bin[3] = ts->cur_fw->data[FW_BIN_VER_OFFSET];
-		ts->fw_ver_bin_bar = ts->cur_fw->data[FW_BIN_VER_BAR_OFFSET];
+			/* download firmware process */
+			if (ts->hw_crc)
+				ret = nvt_download_firmware_hw_crc();
+			else
+				ret = nvt_download_firmware();
+			if (ret) {
+				input_err(true, &ts->client->dev,"Download Firmware failed. (%d)\n", ret);
+				goto download_fail;
+			}
 
-		input_info(true, &ts->client->dev, "%s: fw_ver_bin = %02X%02X%02X%02X\n", __func__,
-			ts->fw_ver_bin[0], ts->fw_ver_bin[1], ts->fw_ver_bin[2], ts->fw_ver_bin[3]);
-	}
+			input_info(true, &ts->client->dev,"Update firmware success! <%ld us>\n",
+					(end.tv_sec - start.tv_sec)*1000000L + (end.tv_usec - start.tv_usec));
 
-	/* initial buffer and variable */
-	ret = nvt_download_init();
-	if (ret) {
-		input_err(true, &ts->client->dev, "Download Init failed. (%d)\n", ret);
-		goto download_fail;
-	}
-
-	/* download firmware process */
-	if (ts->hw_crc)
-		ret = nvt_download_firmware_hw_crc();
-	else
-		ret = nvt_download_firmware();
-	if (ret) {
-		input_err(true, &ts->client->dev, "Download Firmware failed. (%d)\n", ret);
-		goto download_fail;
-	}
-
-	input_info(true, &ts->client->dev, "%s : Update firmware success! <%lldms>\n", __func__,
-					((end.tv_sec - start.tv_sec) * 1000000000L + (end.tv_nsec - start.tv_nsec)) / 1000000L);
-
-	/* Get FW Info */
-	ret = nvt_get_fw_info();
-	if (ret) {
-		input_err(true, &ts->client->dev, "nvt_get_fw_info failed. (%d)\n", ret);
-	}
+			/* Get FW Info */
+			ret = nvt_get_fw_info();
+			if (ret) {
+				input_err(true, &ts->client->dev,"nvt_get_fw_info failed. (%d)\n", ret);
+			}
 
 download_fail:
-	if (!IS_ERR_OR_NULL(bin_map)) {
-		kfree(bin_map);
-		bin_map = NULL;
+			if (!IS_ERR_OR_NULL(bin_map)) {
+				kfree(bin_map);
+				bin_map = NULL;
+			}
+		}
 	}
+
 out:
 	mutex_unlock(&ts->lock);
 
-	release_firmware(fw_entry);
+	filp_close(fp, NULL);
+	set_fs(old_fs);
 
 	return ret;
 }
-
 
 int nvt_ts_fw_update_from_bin(struct nvt_ts_data *ts)
 {
@@ -1286,16 +1274,76 @@ int nvt_ts_fw_update_from_bin(struct nvt_ts_data *ts)
 int nvt_ts_fw_update_from_mp_bin(struct nvt_ts_data *ts, bool is_start)
 {
 	int ret = 0;
-	int tmp_fw_idx;
+	bool saveIsUMS;
 
 	if (is_start) {
-		input_info(true, &ts->client->dev, "%s : cur fw index(%d)\n", __func__, ts->fw_index);
-		tmp_fw_idx = ts->fw_index;
-		ts->fw_index = NVT_TSP_FW_IDX_MP;
+		input_info(true, &ts->client->dev,"isUMS = %s\n", ts->isUMS ? "true but load mp fw" : "false");
+		saveIsUMS = ts->isUMS ? true : false;	//save isUMS status
+		ts->isUMS = false;
 		ret = nvt_update_firmware(ts->platdata->firmware_name_mp);
-		ts->fw_index = tmp_fw_idx;
+		ts->isUMS = saveIsUMS ? true : false;	//restore isUMS status
 	} else {
 		ret = nvt_update_firmware(ts->platdata->firmware_name);
 	}
 	return ret;
 }
+
+/*******************************************************
+Description:
+	Novatek touchscreen update firmware when booting
+	function.
+
+return:
+	n.a.
+*******************************************************/
+void Boot_Update_Firmware(struct work_struct *work)
+{
+	int ret;
+	
+	ts->isUMS = false;
+
+	mutex_lock(&ts->lock);
+	nvt_update_firmware(ts->platdata->firmware_name);
+	mutex_unlock(&ts->lock);
+
+	/* Parsing criteria from dts */
+	if(of_property_read_bool(ts->client->dev.of_node, "novatek,mp-support-dt")) {
+			u8 mpcriteria[32] = { 0 };
+			int pid;
+
+			//---set xdata index to EVENT BUF ADDR---
+			nvt_set_page(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_PROJECTID);
+
+			//---read project id---
+			mpcriteria[0] = EVENT_MAP_PROJECTID;
+			CTP_SPI_READ(ts->client, mpcriteria, 3);
+
+			//---set xdata index to EVENT BUF ADDR---
+			nvt_set_page(ts->mmap->EVENT_BUF_ADDR);
+
+			pid = (mpcriteria[2] << 8) + mpcriteria[1];
+
+			/*
+			* Parsing Criteria by Novatek PID
+			* The string rule is "novatek-mp-criteria-<nvt_pid>"
+			* nvt_pid is 2 bytes (show hex).
+			*
+			* Ex. nvt_pid = 500A
+			*	  mpcriteria = "novatek-mp-criteria-500A"
+			*/
+			snprintf(mpcriteria, sizeof(mpcriteria), "novatek-mp-criteria-%04X", pid);
+
+			ret = nvt_sec_mp_parse_dt(ts, mpcriteria);
+			if (ret) {
+					input_err(true, &ts->client->dev, "%s: failed to parse mp device tree\n",
+							__func__);
+					//return ret;
+			}
+	}
+
+	cancel_delayed_work(&ts->work_print_info);
+	ts->print_info_cnt_open = 0;
+	ts->print_info_cnt_release = 0;
+	schedule_work(&ts->work_print_info.work);
+}
+#endif /* BOOT_UPDATE_FIRMWARE */
