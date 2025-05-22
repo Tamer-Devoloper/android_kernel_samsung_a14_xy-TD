@@ -330,8 +330,10 @@ unsigned int vclk_get_min_freq(unsigned int id)
 
 	vclk = cmucal_get_node(id);
 
-	if (vclk && vclk->lut)
+	if (vclk && vclk->lut) {
+		if (vclk->min_freq == 442000) vclk->min_freq = 312000;
 		rate = vclk->min_freq;
+	}
 
 	return rate;
 }
