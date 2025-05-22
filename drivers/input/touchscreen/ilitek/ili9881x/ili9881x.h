@@ -32,7 +32,7 @@
 #include <linux/errno.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
-#include "../../../sec_input/sec_input.h"
+#include <linux/input/sec_cmd.h>
 #include <linux/input/mt.h>
 #include <linux/list.h>
 #include <linux/platform_device.h>
@@ -42,6 +42,7 @@
 #include <linux/version.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pinctrl/consumer.h>
+#include "../../../pinctrl/core.h"
 #include <linux/power_supply.h>
 #include <linux/fs.h>
 #ifdef CONFIG_COMPAT
@@ -55,6 +56,7 @@
 #include <linux/string.h>
 #include <linux/ctype.h>
 
+#include <linux/netlink.h>
 #include <linux/skbuff.h>
 #include <linux/socket.h>
 #include <net/sock.h>
@@ -86,28 +88,23 @@
 #include <linux/of.h>
 #include <linux/of_gpio.h>
 #endif
-#if IS_ENABLED(CONFIG_VBUS_NOTIFIER)
-#include <linux/vbus_notifier.h>
+
+#ifdef CONFIG_FB
+#include <linux/notifier.h>
+#include <linux/fb.h>
+#else
+#include <linux/earlysuspend.h>
 #endif
+
+#ifdef CONFIG_DRM_MSM
+#include <linux/msm_drm_notify.h>
+#endif
+
 #include "ili9881x_sec_fn.h"
 
 #ifdef CONFIG_MTK_SPI
 #include "mt_spi.h"
 #include "sync_write.h"
-#endif
-
-#ifdef CONFIG_SAMSUNG_TUI
-#include <linux/input/stui_inf.h>
-#endif
-
-#if IS_ENABLED(CONFIG_INPUT_SEC_SECURE_TOUCH)
-#include "../../../sec_input/sec_secure_touch.h"
-#include <linux/atomic.h>
-#include <linux/clk.h>
-#include <linux/pm_runtime.h>
-
-#define SECURE_TOUCH_ENABLE	1
-#define SECURE_TOUCH_DISABLE	0
 #endif
 
 #define DRIVER_VERSION			"3.0.3.0.200610"
@@ -159,30 +156,21 @@
 #define SPRD_SYSFS_SUSPEND_RESUME	DISABLE
 
 /* Path */
-#define CHIP_ID_9882			"9882"
-#define CHIP_ID_7806S			"7806s"
-#define CHIP_ID_9882Q			"9882q"
-#define CHIP_TYPE_9882N			0x17
-#define CHIP_TYPE_9882Q			0x1A
 #define DEBUG_DATA_FILE_SIZE		(10*K)
 #define DEBUG_DATA_FILE_PATH		"/sdcard/ILITEK_log.csv"
-#define INI_PATH			"/vendor/firmware/"
-
-/* 9882n & 7806S */
-#define RAWDATANOBK_LCMON_PATH		"Command_Rawdatanobk_LCMON.ini"
-#define DOZERAW_PATH			"Command_Dozeraw.ini"
-#define DAC_PATH			"Command_DAC.ini"
-#define OPENTESTC_PATH			"Command_opentestC.ini"
-#define SHORTTEST_PATH			"Command_shorttest.ini"
-#define NOISEPP_LCMON_PATH		"Command_noisepp_LCMON.ini"
-#define DOZEPP_PATH			"Command_Dozepp.ini"
-#define NOISEPP_LCMOFF_PATH		"Command_noisepp_LCMOFF.ini"
-#define P2P_TD_PATH			"Command_P2P_TD.ini"
-#define RAWDATATD_PATH			"Command_RawdataTD.ini"
-#define RAWDATANOBK_LCMOFF_PATH		"Command_Rawdatanobk_LCMOFF.ini"
-/* only for 9882q */
-#define RAWDATAHAVEBK_LCMON_PATH	"Command_Rawdatahavebk_LCMON.ini"
-#define RAWDATAHAVEBK_LCMOFF_PATH	"Command_Rawdatahavebk_LCMOFF.ini"
+#define CSV_LCM_ON_PATH			"/sdcard/ilitek_mp_lcm_on_log"
+#define CSV_LCM_OFF_PATH		"/sdcard/ilitek_mp_lcm_off_log"
+#define RAWDATANOBK_LCMON_PATH		"/vendor/firmware/Command_Rawdatanobk_LCMON.ini"
+#define DOZERAW_PATH			"/vendor/firmware/Command_Dozeraw.ini"
+#define DAC_PATH			"/vendor/firmware/Command_DAC.ini"
+#define OPENTESTC_PATH			"/vendor/firmware/Command_opentestC.ini"
+#define SHORTTEST_PATH			"/vendor/firmware/Command_shorttest.ini"
+#define NOISEPP_LCMON_PATH		"/vendor/firmware/Command_noisepp_LCMON.ini"
+#define DOZEPP_PATH			"/vendor/firmware/Command_Dozepp.ini"
+#define NOISEPP_LCMOFF_PATH		"/vendor/firmware/Command_noisepp_LCMOFF.ini"
+#define P2P_TD_PATH			"/vendor/firmware/Command_P2P_TD.ini"
+#define RAWDATATD_PATH			"/vendor/firmware/Command_RawdataTD.ini"
+#define RAWDATANOBK_LCMOFF_PATH		"/vendor/firmware/Command_Rawdatanobk_LCMOFF.ini"
 
 #define POWER_STATUS_PATH		"/sys/class/power_supply/battery/status"
 #define DUMP_FLASH_PATH			"/sdcard/flash_dump"
@@ -420,11 +408,6 @@ enum {
 	LP_FACTORY_STATUS,
 };
 
-enum ILITEK_TSP_FW_INDEX {
-	ILITEK_TSP_FW_IDX_BIN	= 0,
-	ILITEK_TSP_FW_IDX_UMS	= 1,
-};
-
 struct gesture_symbol {
 	u8 double_tap                 :1;
 	u8 alphabet_line_2_top        :1;
@@ -433,7 +416,7 @@ struct gesture_symbol {
 	u8 alphabet_line_2_right      :1;
 	u8 alphabet_m                 :1;
 	u8 alphabet_w                 :1;
-	u8 alphabet_c                 :1;//8
+	u8 alphabet_c                 :1;
 	u8 alphabet_E                 :1;
 	u8 alphabet_V                 :1;
 	u8 alphabet_O                 :1;
@@ -441,12 +424,12 @@ struct gesture_symbol {
 	u8 alphabet_Z                 :1;
 	u8 alphabet_V_down            :1;
 	u8 alphabet_V_left            :1;
-	u8 alphabet_V_right           :1;//8
+	u8 alphabet_V_right           :1;
 	u8 alphabet_two_line_2_bottom :1;
 	u8 alphabet_F                 :1;
 	u8 alphabet_AT                :1;
-	u8 reserve0                   :5;//8
-} __packed;
+	u8 reserve0                   :5;
+}__packed;
 
 struct report_info_block {
 	u8 nReportByPixel	:1;
@@ -458,30 +441,7 @@ struct report_info_block {
 	u8 nReserved01		:8;
 	u8 nReserved02		:8;
 	u8 nReserved03		:8;
-} __packed;
-
-enum MPINI_TEST_ITEM_NUM {
-	MP_ITEM_NOISE_PEAK_TO_PEAK_WITH_PANEL = 0,
-	MP_ITEM_DOZE_PEAK_TO_PEAK,
-	MP_ITEM_SHORT_TEST,
-	MP_ITEM_OPEN_TEST_C,
-	MP_ITEM_RAW_DATA_NOBK,
-	MP_ITEM_CALIBRATION_DATA_DAC,
-	MP_ITEM_DOZE_RAW_DATA,
-	MP_ITEM_NOISE_PEAK_TO_PEAK_WITH_PANEL_LCM_OFF,
-	MP_ITEM_PEAK_TO_PEAK_TD_LCM_OFF,
-	MP_ITEM_RAW_DATA_NOBK_LCM_OFF,
-	MP_ITEM_RAW_DATA_TD_LCM_OFF,
-	MP_ITEM_RAW_DATA_HAVE_BK,
-	MP_ITEM_RAW_DATA_HAVE_BK_LCM_OFF,
-	MP_MAX
-};
-
-enum OUTPUT_DATA_MODE {
-	OUTPUT_DATA = 0,
-	OUTPUT_CSV_NAME,
-	OUTPUT_IRAM_DUMP,
-};
+}__packed;
 
 #define TDDI_I2C_ADDR				0x41
 #define TDDI_DEV_ID				"ilit_ts"
@@ -504,7 +464,7 @@ enum OUTPUT_DATA_MODE {
 #define CORE_VER_1430				0x01040300
 #define CORE_VER_1460				0x01040600
 #define CORE_VER_1470				0x01040700
-#define MAX_HEX_FILE_SIZE			(256*K)
+#define MAX_HEX_FILE_SIZE			(160*K)
 #define ILI_FILE_HEADER				256
 #define DLM_START_ADDRESS			0x20610
 #define DLM_HEX_ADDRESS				0x10000
@@ -520,7 +480,6 @@ enum OUTPUT_DATA_MODE {
 #define SPI_BUF_SIZE				MAX_HEX_FILE_SIZE
 #define INFO_HEX_ST_ADDR			0x4F
 #define INFO_MP_HEX_ADDR			0x1F
-#define INFO_HEX_LPDUMP_ADDR			0x59
 #define INFO_CUSTOMER_INFO_HEX_ADDR		0x5F
 
 /* DMA Control Registers */
@@ -716,7 +675,7 @@ enum OUTPUT_DATA_MODE {
 #define I2C_ESD_GESTURE_PWD_ADDR			0x40054
 
 #define ESD_GESTURE_CORE146_PWD				0xF38A
-#define SPI_ESD_GESTURE_CORE146_RUN			0x5B92
+#define SPI_ESD_GESTURE_CORE146_RUN			0xA67C
 #define I2C_ESD_GESTURE_CORE146_RUN			0xA67C
 #define SPI_ESD_GESTURE_CORE146_PWD_ADDR		0x4005C
 #define I2C_ESD_GESTURE_CORE146_PWD_ADDR		0x4005C
@@ -773,7 +732,6 @@ enum OUTPUT_DATA_MODE {
 #define DATA_FORMAT_DEBUG_LITE_AREA_CMD			0x03
 #define P5_X_DEMO_MODE_PACKET_INFO_LEN			3
 #define P5_X_DEMO_MODE_PACKET_LEN			43
-#define P5_X_SEC_DEMO_MODE_PACKET_LEN		112
 #define P5_X_DEMO_MODE_AXIS_LEN				50
 #define P5_X_DEMO_MODE_STATE_INFO			16
 #define P5_X_INFO_HEADER_LENGTH				3
@@ -805,7 +763,6 @@ enum OUTPUT_DATA_MODE {
 #define P5_X_GET_PROTOCOL_VERSION			0x22
 #define P5_X_GET_CORE_VERSION				0x23
 #define P5_X_GET_CORE_VERSION_NEW			0x24
-#define P5_X_GET_LP_DUMP_STATUE				0x2C
 #define P5_X_MODE_CONTROL				0xF0
 #define P5_X_SET_CDC_INIT				0xF1
 #define P5_X_GET_CDC_DATA				0xF2
@@ -863,15 +820,6 @@ enum OUTPUT_DATA_MODE {
 #define ILITEK_COORDINATE_ACTION_RELEASE	0
 #define ILITEK_COORDINATE_ACTION_PRESS_MOVE	1
 
-#define USB_PLUG_ATTACHED	1
-#define USB_PLUG_DETACHED	0
-
-/* LP DUMP */
-#define LPWG_DUMP_PACKET_SIZE	5		/* 5 byte */
-#define LPWG_DUMP_TOTAL_SIZE	500		/* 5 byte * 100 */
-#define ILITEK_LPDUMP_LCDOFF	0x3
-#define ILITEK_LPDUMP_LCDON		0x7
-
 /* not fixed */
 struct ilitek_coordinate {
 	u8 id;
@@ -920,15 +868,16 @@ struct ilitek_ts_data {
 	struct regulator *lcd_bl_en;
 	const char *regulator_lcd_vddi;
 	struct regulator *lcd_vddi;
-	const char *regulator_lcd_vsp;
-	struct regulator *lcd_vsp;
-	const char *regulator_lcd_vsn;
-	struct regulator *lcd_vsn;
 
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *pins_on_state;
 	struct pinctrl_state *pins_off_state;
 
+#ifdef CONFIG_FB
+	struct notifier_block notifier_fb;
+#else
+	struct early_suspend early_suspend;
+#endif
 #if CHARGER_NOTIFIER_CALLBACK
 #if KERNEL_VERSION(4, 1, 0) <= LINUX_VERSION_CODE
 /* add_for_charger_start */
@@ -939,16 +888,6 @@ struct ilitek_ts_data {
 /*  add_for_charger_end  */
 #endif
 #endif
-#if IS_ENABLED(CONFIG_VBUS_NOTIFIER)
-	struct notifier_block vbus_nb;
-	int usb_plug_status;
-	struct delayed_work work_vbus;
-#endif
-
-	u8 *lpwg_dump_buf;
-	u16 lpwg_dump_buf_idx;
-	u16 lpwg_dump_buf_size;
-
 	struct mutex touch_mutex;
 	struct mutex debug_mutex;
 	struct mutex debug_read_mutex;
@@ -979,10 +918,7 @@ struct ilitek_ts_data {
 	u8 *spi_tx;
 	u8 *spi_rx;
 	unsigned int spi_mode;
-	struct firmware tp_cur_fw;
-	struct firmware tp_bin_fw;
-	struct firmware tp_ums_fw;
-	char *md_fw_rq_path;
+	struct firmware tp_fw;
 
 	int actual_tp_mode;
 	int tp_data_mode;
@@ -997,8 +933,6 @@ struct ilitek_ts_data {
 	int tp_int;
 	int cs_gpio;
 	int wait_int_timeout;
-	int lcd_rst_delay;
-	int poweroff_discharging_us;
 
 	u32 lcd_id;
 	int lcd_id1_gpio;
@@ -1015,6 +949,7 @@ struct ilitek_ts_data {
 
 	int fw_retry;
 	int fw_update_stat;
+	int fw_open;
 	u8  fw_info[75];
 	u8  fw_mp_ver[4];
 	u8  fw_customer_info[6];
@@ -1023,6 +958,7 @@ struct ilitek_ts_data {
 	bool wq_esd_ctrl;
 	bool wq_bat_ctrl;
 
+	bool netlink;
 	bool report;
 	bool gesture;
 	bool mp_retry;
@@ -1050,9 +986,6 @@ struct ilitek_ts_data {
 	int rst_edge_delay;
 	int fw_upgrade_mode;
 	int mp_ret_len;
-	int mp_test_item;
-	int output_data_mode;
-	int output_data_len;
 	u8 proxmity_face;
 	bool wtd_ctrl;
 	bool force_fw_update;
@@ -1060,12 +993,12 @@ struct ilitek_ts_data {
 	bool ddi_rest_done;
 	bool resume_by_ddi;
 	bool tp_suspend;
-	bool tp_shutdown;
 	bool info_from_hex;
 	bool prox_near;
 	bool gesture_load_code;
 	bool trans_xy;
 	bool ss_ctrl;
+	bool node_update;
 	bool int_pulse;
 	bool pll_clk_wakeup;
 	int power_status;
@@ -1074,11 +1007,16 @@ struct ilitek_ts_data {
 	bool prev_palmflag;
 	int sleep_handler_mode;
 	int screen_off_sate;
-	bool lp_dump_enable;
 
 	/* module info */
-	char *mp_csv_name;
-	char *output_data;
+	int tp_module;
+	int md_fw_ili_size;
+	char *md_name;
+	char *md_fw_filp_path;
+	char *md_fw_rq_path;
+	char *md_ini_path;
+	char *md_ini_rq_path;
+	u8 *md_fw_ili;
 
 	atomic_t irq_stat;
 	atomic_t irq_wake_stat;
@@ -1110,10 +1048,6 @@ struct ilitek_ts_data {
 	bool prox_lp_scan_mode;
 	bool dead_zone_enabled;
 	bool sip_mode_enabled;
-	bool game_mode_enabled;
-	bool high_sensitivity_mode_enabled;
-	int clear_cover_mode_enabled;
-	int clear_cover_type;
 	bool prox_lp_scan_mode_enabled;
 
 	/*sec function*/
@@ -1124,7 +1058,6 @@ struct ilitek_ts_data {
 	char *print_buf;
 	short *pFrame;
 	const char *fw_name;
-	int fw_index;
 	bool allnode;
 	char *current_mpitem;
 	u32 node_min;
@@ -1136,7 +1069,7 @@ struct ilitek_ts_data {
 	bool started_prox_intensity;
 	bool incell_power_state;
 	bool signing;
-	unsigned int scrub_id;
+
 
 	/* platform data*/
 	u32 area_indicator;
@@ -1144,9 +1077,7 @@ struct ilitek_ts_data {
 	u32 area_edge;
 
 	bool enable_settings_aot;
-	bool enable_sysinput_enabled;
 	bool support_ear_detect;
-	bool prox_lp_scan_enabled;
 	bool support_spay_gesture_mode;
 
 	struct delayed_work work_read_info;
@@ -1154,13 +1085,6 @@ struct ilitek_ts_data {
 	u32	print_info_cnt_open;
 	u32	print_info_cnt_release;
 	u16	print_info_currnet_mode;
-#if IS_ENABLED(CONFIG_INPUT_SEC_SECURE_TOUCH)
-	atomic_t secure_enabled;
-	atomic_t secure_pending_irqs;
-	struct completion secure_powerdown;
-	struct completion secure_interrupt;
-	struct mutex secure_lock;
-#endif
 
 };
 extern struct ilitek_ts_data *ilits;
@@ -1169,10 +1093,6 @@ struct debug_buf_list {
 	bool mark;
 	unsigned char *data;
 };
-
-//typedef enum {
-//	SPONGE_EVENT_TYPE_SPAY			= 0x04,
-//} SPONGE_EVENT_TYPE;
 
 struct gesture_coordinate {
 	u16 code;
@@ -1248,10 +1168,8 @@ struct ilitek_hwif_info {
 
 #if defined(CONFIG_EXYNOS_DPU30)
 int get_lcd_info(char *arg);
-#elif defined(CONFIG_SMCDSD_PANEL)
-extern unsigned int lcdtype;
 #else
-static unsigned int lcdtype;
+extern unsigned int lcdtype;
 #endif
 
 /* Prototypes for tddi firmware/flash functions */
@@ -1262,7 +1180,7 @@ extern u32 ili_fw_read_hw_crc(u32 start, u32 end, u32 *flash_crc);
 extern int ili_fw_read_flash(u32 start, u32 end, u8 *data, int len);
 extern int ili_fw_dump_iram_data(u32 start, u32 end, bool save);
 extern int ili_fw_dump_flash_data(u32 start, u32 end, bool user);
-extern int ili_fw_upgrade(void);
+extern int ili_fw_upgrade(int op);
 
 /* Prototypes for tddi mp test */
 extern int ili_mp_test_main(char *apk, bool lcm_on);
@@ -1369,6 +1287,7 @@ extern int ili_irq_register(int type);
 extern void ili_node_init(void);
 extern void ili_dump_data(void *data, int type, int len, int row_len, const char *name);
 extern u8 ili_calc_packet_checksum(u8 *packet, int len);
+extern void ili_netlink_reply_msg(void *raw, int size);
 extern int ili_katoi(char *str);
 extern int ili_str2hex(char *str);
 int dev_mkdir(char *name, umode_t mode);
@@ -1382,21 +1301,8 @@ extern void ili_demo_debug_info_mode(u8 *buf, size_t rlen);
 extern void ili_demo_debug_info_id0(u8 *buf, size_t len);
 extern int ili_tp_data_mode_ctrl(u8 *cmd);
 extern void set_current_ic_mode(int mode);
-
-void ili_ic_lpwg_get(void);
-void ili_ic_lpwg_dump_buf_init(void);
-int ili_ic_lpwg_dump_buf_read(u8 *buf);
-int ili_ic_lpwg_dump_buf_write(u8 *buf);
-
-void ilitek_tddi_touch_send_debug_data(u8 *buf, int len);
-#if IS_ENABLED(CONFIG_VBUS_NOTIFIER)
-int ilitek_set_vbus(void);
-#endif
-void ili_read_info_onboot(void *device_data);
-
-#if IS_ENABLED(CONFIG_SPU_VERIFY)
 extern long spu_firmware_signature_verify(const char *fw_name, const u8 *fw_data, const long fw_size);
-#endif
+
 static inline void ipio_kfree(void **mem)
 {
 	if (*mem != NULL) {

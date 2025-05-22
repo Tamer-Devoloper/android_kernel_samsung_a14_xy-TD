@@ -22,208 +22,17 @@
 
 #include "ili9881x.h"
 
-#if IS_ENABLED(CONFIG_INPUT_SEC_SECURE_TOUCH)
-static irqreturn_t ilitek_plat_isr_bottom_half(int irq, void *dev_id);
-irqreturn_t ili_secure_filter_interrupt(struct ilitek_ts_data *ts)
-{
-	mutex_lock(&ts->secure_lock);
-	if (atomic_read(&ts->secure_enabled) == SECURE_TOUCH_ENABLE) {
-		if (atomic_cmpxchg(&ts->secure_pending_irqs, 0, 1) == 0) {
-			sysfs_notify(&ts->input->dev.kobj, NULL, "secure_touch");
-
-		} else {
-			input_info(true, ts->dev, "%s: pending irq:%d\n",
-					__func__, (int)atomic_read(&ts->secure_pending_irqs));
-		}
-
-		mutex_unlock(&ts->secure_lock);
-		return IRQ_HANDLED;
-	}
-
-	mutex_unlock(&ts->secure_lock);
-	return IRQ_NONE;
-}
-
-/**
- * Sysfs attr group for secure touch & interrupt handler for Secure world.
- * @atomic : syncronization for secure_enabled
- * @pm_runtime : set rpm_resume or rpm_ilde
- */
-ssize_t ili_secure_touch_enable_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "%d", atomic_read(&ilits->secure_enabled));
-}
-
-ssize_t ili_secure_touch_enable_store(struct device *dev,
-		struct device_attribute *addr, const char *buf, size_t count)
-{
-	int ret;
-	unsigned long data;
-
-	if (count > 2) {
-		input_err(true, ilits->dev,
-				"%s: cmd length is over (%s,%d)!!\n",
-				__func__, buf, (int)strlen(buf));
-		return -EINVAL;
-	}
-
-	ret = kstrtoul(buf, 10, &data);
-	if (ret != 0) {
-		input_err(true, ilits->dev, "%s: failed to read:%d\n",
-				__func__, ret);
-		return -EINVAL;
-	}
-
-	if (data == 1) {
-		/* Enable Secure World */
-		if (atomic_read(&ilits->secure_enabled) == SECURE_TOUCH_ENABLE) {
-			input_err(true, ilits->dev, "%s: already enabled\n", __func__);
-			return -EBUSY;
-		}
-
-		msleep(200);
-
-		/* syncronize_irq -> disable_irq + enable_irq
-		 * concern about timing issue.
-		 */
-		disable_irq(ilits->irq_num);
-
-		/* Release All Finger */
-
-		if (pm_runtime_get_sync(ilits->spi->controller->dev.parent) < 0) {
-			enable_irq(ilits->irq_num);
-			input_err(true, ilits->dev, "%s: failed to get pm_runtime\n", __func__);
-			return -EIO;
-		}
-
-		reinit_completion(&ilits->secure_powerdown);
-		reinit_completion(&ilits->secure_interrupt);
-
-		atomic_set(&ilits->secure_enabled, 1);
-		atomic_set(&ilits->secure_pending_irqs, 0);
-
-		enable_irq(ilits->irq_num);
-
-		input_info(true, ilits->dev, "%s: secure touch enable\n", __func__);
-
-	} else if (data == 0) {
-		/* Disable Secure World */
-		if (atomic_read(&ilits->secure_enabled) == SECURE_TOUCH_DISABLE) {
-			input_err(true, ilits->dev, "%s: already disabled\n", __func__);
-			return count;
-		}
-
-		msleep(200);
-
-		pm_runtime_put_sync(ilits->spi->controller->dev.parent);
-		atomic_set(&ilits->secure_enabled, 0);
-
-		sysfs_notify(&ilits->input->dev.kobj, NULL, "secure_touch");
-
-		msleep(10);
-
-//		nvt_ts_work_func(ilits->spi->irq, ilits);
-		complete(&ilits->secure_interrupt);
-		complete_all(&ilits->secure_powerdown);
-
-		input_info(true, ilits->dev, "%s: secure touch disable\n", __func__);
-
-	} else {
-		input_err(true, ilits->dev, "%s: unsupport value:%ld\n", __func__, data);
-		return -EINVAL;
-	}
-
-	return count;
-}
-
-ssize_t ili_secure_touch_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	int val = 0;
-
-	mutex_lock(&ilits->secure_lock);
-	if (atomic_read(&ilits->secure_enabled) == SECURE_TOUCH_DISABLE) {
-		mutex_unlock(&ilits->secure_lock);
-		input_err(true, ilits->dev, "%s: disabled\n", __func__);
-		return -EBADF;
-	}
-
-	if (atomic_cmpxchg(&ilits->secure_pending_irqs, -1, 0) == -1) {
-		mutex_unlock(&ilits->secure_lock);
-		input_err(true, ilits->dev, "%s: pending irq -1\n", __func__);
-		return -EINVAL;
-	}
-
-	if (atomic_cmpxchg(&ilits->secure_pending_irqs, 1, 0) == 1) {
-		val = 1;
-		input_err(true, ilits->dev, "%s: pending irq is %d\n",
-				__func__, atomic_read(&ilits->secure_pending_irqs));
-	}
-
-	mutex_unlock(&ilits->secure_lock);
-	complete(&ilits->secure_interrupt);
-
-	return snprintf(buf, PAGE_SIZE, "%u", val);
-}
-
-ssize_t ili_secure_ownership_show(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	return snprintf(buf, PAGE_SIZE, "1");
-}
-
-int ili_secure_touch_init(struct ilitek_ts_data *ts)
-{
-	input_info(true, ts->dev, "%s\n", __func__);
-
-	init_completion(&ts->secure_interrupt);
-	init_completion(&ts->secure_powerdown);
-
-	return 0;
-}
-
-void ili_secure_touch_stop(struct ilitek_ts_data *ts, bool stop)
-{
-	if (atomic_read(&ts->secure_enabled)) {
-		atomic_set(&ts->secure_pending_irqs, -1);
-
-		sysfs_notify(&ts->input->dev.kobj, NULL, "secure_touch");
-
-		if (stop)
-			wait_for_completion_interruptible(&ts->secure_powerdown);
-
-		input_info(true, ts->dev, "%s: %d\n", __func__, stop);
-	}
-}
-
-static DEVICE_ATTR(secure_touch_enable, (S_IRUGO | S_IWUSR | S_IWGRP),
-		ili_secure_touch_enable_show, ili_secure_touch_enable_store);
-static DEVICE_ATTR(secure_touch, S_IRUGO, ili_secure_touch_show, NULL);
-static DEVICE_ATTR(secure_ownership, S_IRUGO, ili_secure_ownership_show, NULL);
-static struct attribute *ili_secure_attr[] = {
-	&dev_attr_secure_touch_enable.attr,
-	&dev_attr_secure_touch.attr,
-	&dev_attr_secure_ownership.attr,
-	NULL,
-};
-
-static struct attribute_group ili_secure_attr_group = {
-	.attrs = ili_secure_attr,
-};
-#endif
-
 void ili_tp_reset(void)
 {
 	input_info(true, ilits->dev, "%s edge delay = %d\n", __func__, ilits->rst_edge_delay);
 
 	/* Need accurate power sequence, do not change it to msleep */
 	gpio_direction_output(ilits->tp_rst, 1);
-	usleep_range(1 * 1000, 1 * 1000);
+	mdelay(1);
 	gpio_set_value(ilits->tp_rst, 0);
-	usleep_range(5 * 1000, 5 * 1000);
+	mdelay(5);
 	gpio_set_value(ilits->tp_rst, 1);
-	msleep(ilits->rst_edge_delay);
+	mdelay(ilits->rst_edge_delay);
 }
 
 static void touch_set_input_prop_proximity(struct input_dev *dev)
@@ -329,17 +138,6 @@ void ili_input_register(void)
 			ilits->input = NULL;
 		}
 	}
-
-#if IS_ENABLED(CONFIG_INPUT_SEC_SECURE_TOUCH)
-	mutex_init(&ilits->secure_lock);
-	if (sysfs_create_group(&ilits->input->dev.kobj, &ili_secure_attr_group) < 0)
-		input_err(true, ilits->dev, "%s: do not make secure group\n", __func__);
-	else
-		ili_secure_touch_init(ilits);
-
-	sec_secure_touch_register(ilits, 1, &ilits->input->dev.kobj);
-	input_info(true, ilits->dev, "%s: init secure touch\n", __func__);
-#endif
 }
 
 #if REGULATOR_POWER
@@ -367,7 +165,7 @@ void ili_plat_regulator_power_on(bool status)
 		}
 	}
 	atomic_set(&ilits->ice_stat, DISABLE);
-	usleep_range(5 * 1000, 5 * 1000);
+	mdelay(5);
 }
 
 static void ilitek_plat_regulator_power_init(void)
@@ -456,7 +254,7 @@ out:
 	gpio_direction_output(ilits->tp_rst, 1);
 
 	gpio_set_value(ilits->tp_rst, 1);
-	msleep(ilits->rst_edge_delay);
+	mdelay(ilits->rst_edge_delay);
 
 	val = gpio_get_value(ilits->tp_rst);
 	val2 = gpio_get_value(ilits->tp_int);
@@ -518,7 +316,7 @@ out:
 void ili_irq_wake_disable(void)
 {
 	if (atomic_read(&ilits->irq_wake_stat) == DISABLE) {
-		input_info(true, ilits->dev, "%s already disabled\n", __func__);
+		input_info(true, ilits->dev, "%s already diabled\n", __func__);
 		return;
 	}
 
@@ -590,17 +388,6 @@ static irqreturn_t ilitek_plat_isr_top_half(int irq, void *dev_id)
 
 static irqreturn_t ilitek_plat_isr_bottom_half(int irq, void *dev_id)
 {
-#if IS_ENABLED(CONFIG_INPUT_SEC_SECURE_TOUCH)
-	if (ili_secure_filter_interrupt(ilits) == IRQ_HANDLED) {
-		wait_for_completion_interruptible_timeout(&ilits->secure_interrupt,
-				msecs_to_jiffies(5 * MSEC_PER_SEC));
-
-		input_info(true, ilits->dev,
-				"%s: secure interrupt handled\n", __func__);
-
-		return IRQ_HANDLED;
-	}
-#endif
 	if (mutex_is_locked(&ilits->touch_mutex)) {
 		ILI_DBG("%s touch is locked, ignore\n", __func__);
 		return IRQ_HANDLED;
@@ -706,8 +493,96 @@ int ili_sysfs_remove_device(struct device *dev)
 
 	return 0;
 }
+#else
+
+#if defined(CONFIG_FB) || defined(CONFIG_DRM_MSM)
+static int ilitek_plat_notifier_fb(struct notifier_block *self, unsigned long event, void *data)
+{
+	int *blank;
+	struct fb_event *evdata = data;
+
+	/*
+	 *	FB_EVENT_BLANK(0x09): A hardware display blank change occurred.
+	 *	FB_EARLY_EVENT_BLANK(0x10): A hardware display blank early change occurred.
+	 */
+	if (evdata && evdata->data) {
+		blank = evdata->data;
+		input_info(true, ilits->dev, "%s blank:%d, event:0x%x (node %d)\n",
+				__func__, *blank, event, evdata->info->node);
+		switch (*blank) {
+		case FB_BLANK_POWERDOWN:
+			if (TP_SUSPEND_PRIO) {
+				if (event == FB_EARLY_EVENT_BLANK) {
+					if (ili_sleep_handler(TP_EARLY_SUSPEND) < 0)
+						input_err(true, ilits->dev, "%s TP suspend failed\n", __func__);
+				} else {
+					return NOTIFY_DONE;
+				}
+			} else {
+				if (event != FB_EVENT_BLANK)
+					return NOTIFY_DONE;
+			}
+			break;
+		case FB_BLANK_UNBLANK:
+		case FB_BLANK_NORMAL:
+			if (event == FB_EARLY_EVENT_BLANK) {
+				if((ilits->screen_off_sate != TP_EARLY_RESUME) && (ilits->screen_off_sate != TP_RESUME))
+					ili_sleep_handler(TP_EARLY_RESUME);
+				return NOTIFY_DONE;
+			} else if (event == FB_EVENT_BLANK) {
+				if (ili_sleep_handler(TP_RESUME) < 0)
+					input_err(true, ilits->dev, "%s TP resume failed\n", __func__);
+			}
+			break;
+		default:
+			input_err(true, ilits->dev, "%s Unknown event, blank = %d\n", __func__, *blank);
+			break;
+		}
+	}
+	return NOTIFY_OK;
+}
+#else
+static void ilitek_plat_early_suspend(struct early_suspend *h)
+{
+	if (ili_sleep_handler(TP_EARLY_SUSPEND) < 0)
+		input_err(true, ilits->dev, "%s TP suspend failed\n", __func__);
+}
+
+static void ilitek_plat_late_resume(struct early_suspend *h)
+{
+	if (ili_sleep_handler(TP_RESUME) < 0)
+		input_err(true, ilits->dev, "%s TP resume failed\n", __func__);
+}
 #endif
 
+static void ilitek_plat_sleep_init(void)
+{
+#if defined(CONFIG_FB) || defined(CONFIG_DRM_MSM)
+	input_info(true, ilits->dev, "%s Init notifier_fb struct\n", __func__);
+	ilits->notifier_fb.notifier_call = ilitek_plat_notifier_fb;
+#if defined(CONFIG_DRM_MSM)
+		if (msm_drm_register_client(&ilits->notifier_fb)) {
+			input_err(true, ilits->dev, "%s msm_drm_register_client Unable to register fb_notifier\n",
+				 __func__);
+		}
+#else
+#if CONFIG_PLAT_SPRD
+	if (adf_register_client(&ilits->notifier_fb))
+		input_err(true, ilits->dev, "%s Unable to register notifier_fb\n", __func__);
+#else
+	if (fb_register_client(&ilits->notifier_fb))
+		input_err(true, ilits->dev, "%s Unable to register notifier_fb\n", __func__);
+#endif /* CONFIG_PLAT_SPRD */
+#endif /* CONFIG_DRM_MSM */
+#else
+	input_info(true, ilits->dev, "%s Init eqarly_suspend struct\n", __func__);
+	ilits->early_suspend.suspend = ilitek_plat_early_suspend;
+	ilits->early_suspend.resume = ilitek_plat_late_resume;
+	ilits->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
+	register_early_suspend(&ilits->early_suspend);
+#endif
+}
+#endif
 #if CHARGER_NOTIFIER_CALLBACK
 #if KERNEL_VERSION(4, 1, 0) <= LINUX_VERSION_CODE
 /* add_for_charger_start */
@@ -776,54 +651,7 @@ void ilitek_plat_charger_init(void)
 /* add_for_charger_end */
 #endif
 #endif
-#if IS_ENABLED(CONFIG_VBUS_NOTIFIER)
-int ilitek_set_vbus(void)
-{
-	int ret = 0;
 
-	if (ilits->power_status == POWER_OFF_STATUS || ilits->tp_shutdown || atomic_read(&ilits->fw_stat) != END) {
-		input_info(true, ilits->dev, "%s: power off status(%d,%d)\n",
-					__func__, ilits->power_status, ilits->tp_shutdown);
-		return ret;
-	}
-
-	ret = ili_ic_func_ctrl("plug", !ilits->usb_plug_status);// plug in
-	if (ret < 0)
-		input_err(true, ilits->dev, "%s Write plug in failed\n", __func__);
-
-	return ret;
-}
-
-void ilitek_vbus_work(struct work_struct *work)
-{
-	mutex_lock(&ilits->touch_mutex);
-	ilitek_set_vbus();
-	mutex_unlock(&ilits->touch_mutex);
-}
-
-static int ilitek_vbus_notifier(struct notifier_block *nb, unsigned long cmd, void *data)
-{
-	vbus_status_t vbus_type = *(vbus_status_t *) data;
-
-	input_info(true, ilits->dev, "%s: cmd: %lu, vbus_type: %d\n", __func__, cmd, vbus_type);
-
-	switch (vbus_type) {
-	case STATUS_VBUS_HIGH:
-		ilits->usb_plug_status = USB_PLUG_ATTACHED;
-		break;
-	case STATUS_VBUS_LOW:
-		ilits->usb_plug_status = USB_PLUG_DETACHED;
-		break;
-	default:
-		input_info(true, ilits->dev, "%s: NOT activation\n", __func__);
-		break;
-	}
-
-	schedule_work(&ilits->work_vbus.work);
-
-	return NOTIFY_DONE;
-}
-#endif
 static int parse_dt(void)
 {
 	int retval;
@@ -831,14 +659,17 @@ static int parse_dt(void)
 	struct property *prop;
 	struct device_node *np = ilits->dev->of_node;
 	u32 px_zone[3] = { 0 };
+	u32 read_lcdid;
 #if defined(CONFIG_EXYNOS_DPU30)
 	int lcdtype = 0;
 	int connected = 0;
 #endif
-	int lcd_id1_gpio = 0, lcd_id2_gpio = 0, lcd_id3_gpio = 0;
-	int fw_name_cnt = 0;
-	int lcdtype_cnt = 0;
-	int fw_sel_idx = 0;
+
+	retval = of_property_read_u32(np, "iliteck,lcdtype", &ilits->lcdtype);
+	if (retval < 0) {
+		input_err(true, ilits->dev, "%s Unable to read iliteck,lcdid property\n", __func__);
+		ilits->lcdtype = -1;
+	}
 
 #if defined(CONFIG_EXYNOS_DPU30)
 	connected = get_lcd_info("connected");
@@ -859,86 +690,47 @@ static int parse_dt(void)
 		input_err(true, ilits->dev, "%s: Failed to get lcd info\n", __func__);
 		return -EINVAL;
 	}
-	input_info(true, ilits->dev, "%s: lcdtype : 0x%08X\n", __func__, lcdtype);
+	input_info(true, ilits->dev, "%s: lcdtype : 0x%08X, panel type : 0x%08X\n", __func__, lcdtype, ilits->lcdtype);
+
+	if (ilits->lcdtype != 0x00 && ilits->lcdtype != lcdtype) {
+		input_err(true, ilits->dev, "%s: panel mismatched, unload driver\n", __func__);
+		return -EINVAL;
+	}
 
 #else
-	input_info(true, ilits->dev, "%s: lcdtype : 0x%08X\n", __func__, lcdtype);
+	input_info(true, ilits->dev, "%s: DT lcd type(0x%06X), lcdtype(0x%06X)\n", __func__, ilits->lcdtype, lcdtype);
 #endif
 
-	fw_name_cnt = of_property_count_strings(np, "ilitek,fw_name");
-
-	if (fw_name_cnt == 0) {
-		input_err(true, ilits->dev, "%s: abnormal fw count\n", __func__);
-		return -EINVAL;
-
-	} else if (fw_name_cnt == 1) {
-
-		retval = of_property_read_u32(np, "ilitek,lcdtype", &ilits->lcdtype);
-		if (retval < 0) {
-			input_err(true, ilits->dev, "%s Unable to read ilitek,lcdid property\n", __func__);
-			ilits->lcdtype = -1;
-		} else {
-			input_info(true, ilits->dev, "%s: DT lcd type(0x%06X), lcdtype(0x%06X)\n", __func__, ilits->lcdtype, lcdtype);
-
-			if (ilits->lcdtype != 0x00 && ilits->lcdtype != (lcdtype & 0x00ffff)) {
-				input_err(true, ilits->dev, "%s: panel mismatched, unload driver\n", __func__);
-				return -EINVAL;
-			}
-		}
+	ilits->lcd_id1_gpio = of_get_named_gpio(np, "iliteck,lcdid1-gpio", 0);
+	if (gpio_is_valid(ilits->lcd_id1_gpio)) {
+		input_info(true, ilits->dev, "%s: lcd id1_gpio %d(%d)\n",
+			__func__, ilits->lcd_id1_gpio, gpio_get_value(ilits->lcd_id1_gpio));
 	} else {
-		lcd_id1_gpio = of_get_named_gpio(np, "ilitek,lcdid1-gpio", 0);
-		if (gpio_is_valid(lcd_id1_gpio))
-			input_info(true, ilits->dev, "%s: lcd id1_gpio %d(%d)\n",
-				__func__, lcd_id1_gpio, gpio_get_value(lcd_id1_gpio));
-		else {
-			input_err(true, ilits->dev, "%s: Failed to get ilitek,lcdid1-gpio\n", __func__);
-			return -EINVAL;
-		}
-
-		lcd_id2_gpio = of_get_named_gpio(np, "ilitek,lcdid2-gpio", 0);
-		if (gpio_is_valid(lcd_id2_gpio)) {
-			input_info(true, ilits->dev, "%s: lcd id2_gpio %d(%d)\n",
-				__func__, lcd_id2_gpio, gpio_get_value(lcd_id2_gpio));
-		} else {
-			input_err(true, ilits->dev, "%s: Failed to get ilitek,lcdid2-gpio\n", __func__);
-			return -EINVAL;
-		}
-
-		/* support lcd id3 */
-		lcd_id3_gpio = of_get_named_gpio(np, "ilitek,lcdid3-gpio", 0);
-		if (gpio_is_valid(lcd_id3_gpio)) {
-			input_info(true, ilits->dev, "%s: lcd id3_gpio %d(%d)\n",
-				__func__, lcd_id3_gpio, gpio_get_value(lcd_id3_gpio));
-			fw_sel_idx =
-				(gpio_get_value(lcd_id3_gpio) << 2) | (gpio_get_value(lcd_id2_gpio) << 1) | gpio_get_value(lcd_id1_gpio);
-		} else {
-			input_err(true, ilits->dev, "%s: Failed to get ilitek,lcdid3-gpio and use #1 &#2 id\n", __func__);
-			fw_sel_idx = (gpio_get_value(lcd_id2_gpio) << 1) | gpio_get_value(lcd_id1_gpio);
-		}
-
-		lcdtype_cnt = of_property_count_u32_elems(np, "ilitek,lcdtype");
-
-		input_info(true, ilits->dev, "%s: fw_name_cnt(%d) & lcdtype_cnt(%d) & fw_sel_idx(%d)\n",
-					__func__, fw_name_cnt, lcdtype_cnt, fw_sel_idx);
-
-		if (lcdtype_cnt <= 0 || fw_name_cnt <= 0 || lcdtype_cnt <= fw_sel_idx || fw_name_cnt <= fw_sel_idx) {
-			input_err(true, ilits->dev, "%s: abnormal lcdtype & fw name count, fw_sel_idx(%d)\n",
-					__func__, fw_sel_idx);
-			return -EINVAL;
-		}
-		of_property_read_u32_index(np, "ilitek,lcdtype", fw_sel_idx, &ilits->lcdtype);
-		input_info(true, ilits->dev, "%s: lcd id(%d), ap lcdtype=0x%06X & dt lcdtype=0x%06X\n",
-						__func__, fw_sel_idx, lcdtype, ilits->lcdtype);
+		input_err(true, ilits->dev, "%s: Failed to get iliteck,lcdid1-gpio\n", __func__);
 	}
 
-	of_property_read_string_index(np, "ilitek,fw_name", fw_sel_idx, &ilits->fw_name);
-	if (ilits->fw_name == NULL || strlen(ilits->fw_name) == 0) {
-		input_err(true, ilits->dev, "%s: Failed to get fw name\n", __func__);
-		return -EINVAL;
+	ilits->lcd_id2_gpio = of_get_named_gpio(np, "iliteck,lcdid2-gpio", 0);
+	if (gpio_is_valid(ilits->lcd_id2_gpio)) {
+		input_info(true, ilits->dev, "%s: lcd id2_gpio %d(%d)\n",
+				__func__, ilits->lcd_id2_gpio, gpio_get_value(ilits->lcd_id2_gpio));
+	} else {
+		input_err(true, ilits->dev, "%s: Failed to get iliteck,lcdid2-gpio\n", __func__);
 	}
-	input_info(true, ilits->dev, "%s: fw name(%s)\n", __func__, ilits->fw_name);
 
-	retval = of_property_read_string(np, "ilitek,lcd_rst", &ilits->regulator_lcd_rst);
+	read_lcdid = (gpio_get_value(ilits->lcd_id2_gpio) << 1) | gpio_get_value(ilits->lcd_id1_gpio);
+
+	retval = of_property_read_u32(np, "iliteck,lcdid", &ilits->lcd_id);
+	if (retval < 0) {
+		input_err(true, ilits->dev, "%s Unable to read iliteck,lcdid property\n", __func__);
+		ilits->lcd_id = -1;
+	} else {
+		input_info(true, ilits->dev, "%s: lcd id(%d), read lcd id(%d)\n", __func__, ilits->lcd_id, read_lcdid);
+		if (ilits->lcd_id != read_lcdid) {
+			input_err(true, ilits->dev, "%s: lcd id mismatched!\n", __func__);
+			return -EINVAL;
+		}
+	}
+	retval = of_property_read_string(np, "iliteck,lcd_rst", &ilits->regulator_lcd_rst);
 	if (retval < 0) {
 		input_err(true, ilits->dev, "%s: Failed to get regulator_lcd_rst name property\n", __func__);
 	} else {
@@ -951,7 +743,7 @@ static int parse_dt(void)
 		}
 	}
 
-	retval = of_property_read_string(np, "ilitek,lcd_bl_en", &ilits->regulator_lcd_bl_en);
+	retval = of_property_read_string(np, "iliteck,lcd_bl_en", &ilits->regulator_lcd_bl_en);
 	if (retval < 0) {
 		input_err(true, ilits->dev, "%s: Failed to get regulator_lcd_bl_en name property\n", __func__);
 	} else {
@@ -964,9 +756,9 @@ static int parse_dt(void)
 		}
 	}
 
-	retval = of_property_read_string(np, "ilitek,lcd_vddi", &ilits->regulator_lcd_vddi);
+	retval = of_property_read_string(np, "iliteck,lcd_vddi", &ilits->regulator_lcd_vddi);
 	if (retval < 0) {
-		input_err(true, ilits->dev, "%s: Failed to get regulator_lcd_vddi name property\n", __func__);
+		input_err(true, ilits->dev, "%s: Failed to get regulator_lcd_rst name property\n", __func__);
 	} else {
 		if (!ilits->lcd_vddi)
 			ilits->lcd_vddi = devm_regulator_get(ilits->dev, ilits->regulator_lcd_vddi);
@@ -977,60 +769,36 @@ static int parse_dt(void)
 		}
 	}
 
-	retval = of_property_read_string(np, "ilitek,lcd_vsp", &ilits->regulator_lcd_vsp);
-	if (retval < 0) {
-		input_err(true, ilits->dev, "%s: Failed to get regulator_lcd_vsp name property\n", __func__);
-	} else {
-		if (!ilits->lcd_vsp)
-			ilits->lcd_vsp = devm_regulator_get(ilits->dev, ilits->regulator_lcd_vsp);
-		if (IS_ERR_OR_NULL(ilits->lcd_vsp)) {
-			input_err(true, ilits->dev, "%s: Failed to get %s regulator.\n",
-					__func__, ilits->regulator_lcd_vsp);
-//			return -ENODEV;
-		}
-	}
-	retval = of_property_read_string(np, "ilitek,lcd_vsn", &ilits->regulator_lcd_vsn);
-	if (retval < 0) {
-		input_err(true, ilits->dev, "%s: Failed to get regulator_lcd_vsn name property\n", __func__);
-	} else {
-		if (!ilits->lcd_vsn)
-			ilits->lcd_vsn = devm_regulator_get(ilits->dev, ilits->regulator_lcd_vsn);
-		if (IS_ERR_OR_NULL(ilits->lcd_vsn)) {
-			input_err(true, ilits->dev, "%s: Failed to get %s regulator.\n",
-					__func__, ilits->regulator_lcd_vsn);
-//			return -ENODEV;
-		}
-	}
-	prop = of_find_property(np, "ilitek,irq-gpio", NULL);
+	prop = of_find_property(np, "iliteck,irq-gpio", NULL);
 	if (prop && prop->length) {
 		ilits->tp_int = of_get_named_gpio_flags(np,
-				"ilitek,irq-gpio", 0,
+				"iliteck,irq-gpio", 0,
 				(enum of_gpio_flags *)&ilits->irq_flags);
 	} else {
 		ilits->tp_int = -1;
 	}
 
-	prop = of_find_property(np, "ilitek,reset-gpio", NULL);
+	prop = of_find_property(np, "iliteck,reset-gpio", NULL);
 	if (prop && prop->length) {
 		ilits->tp_rst = of_get_named_gpio_flags(np,
-				"ilitek,reset-gpio", 0, NULL);
+				"iliteck,reset-gpio", 0, NULL);
 	} else {
 		ilits->tp_rst = -1;
 	}
 	input_err(true, ilits->dev, "%s ilits->tp_rst : %d\n", __func__, ilits->tp_rst);
 
-	prop = of_find_property(np, "ilitek,cs-gpio", NULL);
+	prop = of_find_property(np, "iliteck,cs-gpio", NULL);
 	if (prop && prop->length)
-		ilits->cs_gpio = of_get_named_gpio_flags(np, "ilitek,cs-gpio", 0, NULL);
+		ilits->cs_gpio = of_get_named_gpio_flags(np, "iliteck,cs-gpio", 0, NULL);
 	else
 		ilits->cs_gpio = -1;
 	input_info(true, ilits->dev, "%s ilits->cs_gpio : %d\n", __func__, ilits->cs_gpio);
 
-	prop = of_find_property(np, "ilitek,spi-mode", NULL);
+	prop = of_find_property(np, "iliteck,spi-mode", NULL);
 	if (prop && prop->length) {
-		retval = of_property_read_u32(np, "ilitek,spi-mode", &value);
+		retval = of_property_read_u32(np, "iliteck,spi-mode", &value);
 		if (retval < 0) {
-			input_err(true, ilits->dev, "%s Unable to read ilitek,spi-mode property\n", __func__);
+			input_err(true, ilits->dev, "%s Unable to read iliteck,spi-mode property\n", __func__);
 			return retval;
 		}
 		ilits->spi_mode = value;
@@ -1038,35 +806,15 @@ static int parse_dt(void)
 		ilits->spi_mode = 0;
 	}
 
-	prop = of_find_property(np, "ilitek,lcd_rst_delay", NULL);
-	if (prop && prop->length) {
-		retval = of_property_read_u32(np, "ilitek,lcd_rst_delay", &value);
-		if (retval < 0) {
-			input_err(true, ilits->dev, "%s Unable to read ilitek,lcd_rst_delay property\n", __func__);
-			ilits->lcd_rst_delay = 0;
-		} else{
-			ilits->lcd_rst_delay = value;
-		}
-	} else {
-		ilits->lcd_rst_delay = 0;
+	retval = of_property_read_string(np, "iliteck,fw_name", &ilits->fw_name);
+	if (retval < 0) {
+		input_err(true, ilits->dev,
+				"%s Unable to read iliteck,fw_name property\n", __func__);
+		return retval;
 	}
+	input_info(true, ilits->dev, "fw path %s\n", ilits->fw_name);
 
-	prop = of_find_property(np, "ilitek,poweroff-discharging-us", NULL);
-	if (prop && prop->length) {
-		retval = of_property_read_u32(np, "ilitek,poweroff-discharging-us", &value);
-		if (retval < 0) {
-			input_err(true, ilits->dev, "%s Unable to read ilitek,poweroff-discharging-us property\n", __func__);
-			return retval;
-		}
-		ilits->poweroff_discharging_us = value;
-	} else {
-		ilits->poweroff_discharging_us = 0;
-	}
-
-	input_info(true, ilits->dev, "%s: lcd_rst_delay : %d(us), poweroff_discharing_us:%d(us)\n", __func__,
-			ilits->lcd_rst_delay, ilits->poweroff_discharging_us);
-
-	if (of_property_read_u32_array(np, "ilitek,area-size", px_zone, 3)) {
+	if (of_property_read_u32_array(np, "iliteck,area-size", px_zone, 3)) {
 		input_err(true, ilits->dev, "%s : Failed to get zone's size\n", __func__);
 		ilits->area_indicator = 47;
 		ilits->area_navigation = 75;
@@ -1079,29 +827,25 @@ static int parse_dt(void)
 	input_info(true, ilits->dev, "%s : zone's size - indicator:%d, navigation:%d, edge:%d\n",
 		__func__, ilits->area_indicator, ilits->area_navigation, ilits->area_edge);
 
-	ilits->enable_settings_aot = of_property_read_bool(np, "ilitek,enable_settings_aot");
-	ilits->enable_sysinput_enabled = of_property_read_bool(np, "ilitek,enable_sysinput_enabled");
-	ilits->support_ear_detect = of_property_read_bool(np, "ilitek,support_ear_detect_mode");
-	ilits->prox_lp_scan_enabled = of_property_read_bool(np, "ilitek,prox_lp_scan_enabled");
-	ilits->support_spay_gesture_mode = of_property_read_bool(np, "ilitek,support_spay_gesture_mode");
-	input_info(true, ilits->dev, "%s : supprot: %s%s%s%s%s\n",
+	ilits->enable_settings_aot = of_property_read_bool(np, "iliteck,enable_settings_aot");
+	ilits->support_ear_detect = of_property_read_bool(np, "iliteck,support_ear_detect_mode");
+	ilits->support_spay_gesture_mode = of_property_read_bool(np, "iliteck,support_spay_gesture_mode");
+	input_info(true, ilits->dev, "%s : supprot: %s%s%s\n",
 				__func__, ilits->enable_settings_aot ? " AOT" : "",
-				ilits->enable_sysinput_enabled ? " SE" : "",
 				ilits->support_ear_detect ? " ED" : "",
-				ilits->support_spay_gesture_mode ? "SPAY" : "",
-				ilits->prox_lp_scan_enabled ? "LPSCAN" : "");
+				ilits->support_spay_gesture_mode ? "SPAY" : "");
 
 	ilits->pinctrl = pinctrl_get_select_default(ilits->dev);
 	if (!IS_ERR(ilits->pinctrl)) {
-		ilits->pins_on_state = pinctrl_lookup_state(ilits->pinctrl, "on_state");
+		ilits->pins_on_state = pinctrl_lookup_state(ilits->pinctrl, "pins_on_state");
 		if (IS_ERR(ilits->pins_on_state)) {
-			input_err(true, ilits->dev, "could not get pins on_state (%li)\n",
+			input_err(true, ilits->dev, "could not get pins pins_on_state (%li)\n",
 				PTR_ERR(ilits->pins_on_state));
 		}
 
-		ilits->pins_off_state = pinctrl_lookup_state(ilits->pinctrl, "off_state");
+		ilits->pins_off_state = pinctrl_lookup_state(ilits->pinctrl, "pins_off_state");
 		if (IS_ERR(ilits->pins_off_state)) {
-			input_err(true, ilits->dev, "could not get pins off_state (%li)\n",
+			input_err(true, ilits->dev, "could not get pins pins_on_state (%li)\n",
 				PTR_ERR(ilits->pins_off_state));
 		}
 	} else {
@@ -1142,6 +886,8 @@ static int ilitek_plat_probe(void)
 	ili_sysfs_add_device(ilits->dev);
 	if (sysfs_create_link(NULL, &ilits->dev->kobj, "touchscreen") < 0)
 		input_info(true, ilits->dev, "%s Failed to create link!\n", __func__);
+#else
+	ilitek_plat_sleep_init();
 #endif
 	ilits->pm_suspend = false;
 	init_completion(&ilits->pm_completion);
@@ -1152,13 +898,6 @@ static int ilitek_plat_probe(void)
 	/* add_for_charger_end */
 #endif
 #endif
-#if IS_ENABLED(CONFIG_VBUS_NOTIFIER)
-	INIT_DELAYED_WORK(&ilits->work_vbus, ilitek_vbus_work);
-	vbus_notifier_register(&ilits->vbus_nb, ilitek_vbus_notifier, VBUS_NOTIFY_DEV_CHARGER);
-#endif
-
-	ili_ic_lpwg_dump_buf_init();
-
 	input_info(true, ilits->dev, "%s ILITEK Driver loaded successfully!", __func__);
 	return 0;
 }
@@ -1178,7 +917,7 @@ static int ilitek_tp_pm_resume(struct device *dev)
 	complete(&ilits->pm_completion);
 	return 0;
 }
-/*
+
 static int ilitek_plat_remove(void)
 {
 	input_info(true, ilits->dev, "%s remove plat dev\n", __func__);
@@ -1197,14 +936,14 @@ static int ilitek_plat_shutdown(void)
 
 	return 0;
 }
-*/
+
 static const struct dev_pm_ops tp_pm_ops = {
 	.suspend = ilitek_tp_pm_suspend,
 	.resume = ilitek_tp_pm_resume,
 };
 
 static const struct of_device_id tp_match_table[] = {
-	{.compatible = "ilitek,ili9881x-spi"},
+	{.compatible = "iliteck,ili9882x-spi"},
 	{},
 };
 
@@ -1214,9 +953,8 @@ static struct ilitek_hwif_info hwif = {
 	.name = TDDI_DEV_ID,
 	.of_match_table = of_match_ptr(tp_match_table),
 	.plat_probe = ilitek_plat_probe,
-/* Shutdown is called from the SemInputDeviceManagerService. */
-//	.plat_shutdown = ilitek_plat_shutdown,
-//	.plat_remove = ilitek_plat_remove,
+	.plat_shutdown = ilitek_plat_shutdown,
+	.plat_remove = ilitek_plat_remove,
 	.pm = &tp_pm_ops,
 };
 
