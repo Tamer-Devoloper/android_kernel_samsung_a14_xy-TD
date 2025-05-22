@@ -1,6 +1,6 @@
 #!/bin/bash
 
-XY_VERSION="R2.5-P"
+XY_VERSION="R2.7UC-E"
 
 set -e
 
