@@ -404,7 +404,6 @@ void ili_input_register(void)
 			ilits->input = NULL;
 		}
 	}
-}
 
 #if REGULATOR_POWER
 void ili_plat_regulator_power_on(bool status)
